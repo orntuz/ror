@@ -377,14 +377,6 @@ function Get-DefenderStatusAlerts {
     return $alerts
 }
 
-
-# ============================================================================
-# Additional integrity/security checks
-# Added from the supplementary audit script, but kept READ-ONLY.
-# These checks report suspicious state; they do not modify Defender, registry,
-# PowerShell, or any other Windows security setting.
-# ============================================================================
-
 $script:CorePowerShellModules = @(
     'Microsoft.PowerShell.Archive',
     'Microsoft.PowerShell.Diagnostics',
