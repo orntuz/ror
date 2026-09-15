@@ -13,7 +13,7 @@ foreach ($__n in @(
 
 Clear-Host
 
-$script:RoRVersion = '1.7.0'
+$script:RoRVersion = '1.0.0'
 
 function Disable-ConsoleQuickEdit {
     try {
