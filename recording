@@ -13,7 +13,7 @@ foreach ($__n in @(
 
 Clear-Host
 
-$script:RoRVersion = '1.0.0'
+$script:RoRVersion = '1.7.0'
 
 function Disable-ConsoleQuickEdit {
     try {
@@ -377,6 +377,14 @@ function Get-DefenderStatusAlerts {
     return $alerts
 }
 
+
+# ============================================================================
+# Additional integrity/security checks
+# Added from the supplementary audit script, but kept READ-ONLY.
+# These checks report suspicious state; they do not modify Defender, registry,
+# PowerShell, or any other Windows security setting.
+# ============================================================================
+
 $script:CorePowerShellModules = @(
     'Microsoft.PowerShell.Archive',
     'Microsoft.PowerShell.Diagnostics',
@@ -647,6 +655,73 @@ function Get-CheatFolderHits {
     }
 
     return @($hits)
+}
+
+function Get-BamHistoryAlerts {
+    # Full BAM/DAM execution-history scan: unlike Get-BamRegistryFingerprints (which only
+    # baselines keys to catch deletions during a match), this reconstructs the historical
+    # timestamped execution record and flags entries against the cheat-keyword list and
+    # Authenticode signature, for a one-time pre-match audit of what has run on this machine.
+    $alerts = @()
+    $roots = @(
+        'SYSTEM\CurrentControlSet\Services\bam\State\UserSettings',
+        'SYSTEM\CurrentControlSet\Services\dam\State\UserSettings'
+    )
+
+    foreach ($root in $roots) {
+        try {
+            $rootKey = Open-LocalMachineRegistryKey -SubKeyPath $root
+            if (-not $rootKey) { continue }
+
+            foreach ($sidName in $rootKey.GetSubKeyNames()) {
+                if ($sidName -eq 'S-1-5-18') { continue }
+                $sidKey = $rootKey.OpenSubKey($sidName)
+                if (-not $sidKey) { continue }
+
+                foreach ($valueName in $sidKey.GetValueNames()) {
+                    if (-not $valueName) { continue }
+                    $raw = $sidKey.GetValue($valueName)
+                    if (-not $raw -or $raw.Length -lt 8) { continue }
+
+                    # Heuristic: BAM stores device paths (\Device\HarddiskVolumeN\...).
+                    # Resolving the volume number to a drive letter reliably needs extra
+                    # lookups; as a best-effort heuristic (same one manual BAM tools use)
+                    # we assume the system volume, which is right in the common case.
+                    $resolvedPath = $null
+                    if ($valueName -match '^\\Device\\HarddiskVolume\d+\\(.+)$') {
+                        $resolvedPath = Join-Path $env:SystemDrive $matches[1]
+                    }
+                    $leaf = Split-Path -Leaf $valueName
+
+                    $kw = Get-MatchedCheatKeyword -Text $valueName
+                    if (-not $kw -and $resolvedPath) { $kw = Get-MatchedCheatKeyword -Text $resolvedPath }
+
+                    if ($kw) {
+                        $hex = [System.BitConverter]::ToString($raw[7..0]) -replace '-', ''
+                        $ranAt = 'unknown time'
+                        try { $ranAt = (Get-Date ([DateTime]::FromFileTime([Convert]::ToInt64($hex, 16))) -Format 'yyyy-MM-dd HH:mm:ss') } catch {}
+                        $alerts += "FAILURE: Execution history [$kw] '$leaf' ran $ranAt -> $valueName"
+                        continue
+                    }
+
+                    if ($resolvedPath -and (Test-Path -LiteralPath $resolvedPath -PathType Leaf) -and
+                        -not (Test-TrustedProcessPath -ExecutablePath $resolvedPath)) {
+                        try {
+                            $sig = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -FilePath $resolvedPath -ErrorAction Stop
+                            if ($sig.Status -ne 'Valid') {
+                                $alerts += "WARNING: Unsigned executable in run history: $resolvedPath ($($sig.Status))"
+                            }
+                        } catch {}
+                    }
+                }
+                $sidKey.Close()
+            }
+            $rootKey.Close()
+        } catch {}
+    }
+
+    if ($alerts.Count -eq 0) { $alerts += 'SUCCESS: No suspicious entries in execution history.' }
+    return @($alerts | Select-Object -Unique)
 }
 
 function Get-BamRegistryFingerprints {
@@ -978,6 +1053,110 @@ function Get-MatchedCheatKeyword {
         }
     }
     return $null
+}
+
+function Get-PersistenceAlerts {
+    # Automated equivalent of manually reviewing Sysinternals Autoruns: checks the common
+    # persistence points (Run keys, Startup folders, Scheduled Tasks) against the same
+    # cheat-keyword list used elsewhere, without needing a human to eyeball a GUI tool.
+    $alerts = @()
+
+    $runKeys = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'
+    )
+
+    foreach ($keyPath in $runKeys) {
+        try {
+            $props = Get-ItemProperty -Path $keyPath -ErrorAction Stop
+            foreach ($prop in $props.PSObject.Properties) {
+                if ($prop.Name -match '^PS(Path|ParentPath|ChildName|Provider)$') { continue }
+                $value = [string]$prop.Value
+                $kw = Get-MatchedCheatKeyword -Text $value
+                if (-not $kw) { $kw = Get-MatchedCheatKeyword -Text $prop.Name }
+                if ($kw) {
+                    $alerts += "FAILURE: Autorun entry [$kw] '$($prop.Name)' in $keyPath -> $value"
+                }
+            }
+        } catch {}
+    }
+
+    $startupFolders = @()
+    try { $startupFolders += [Environment]::GetFolderPath('Startup') } catch {}
+    try { $startupFolders += [Environment]::GetFolderPath('CommonStartup') } catch {}
+
+    foreach ($folder in ($startupFolders | Select-Object -Unique)) {
+        if ([string]::IsNullOrWhiteSpace($folder) -or -not (Test-Path -LiteralPath $folder)) { continue }
+        Get-ChildItem -LiteralPath $folder -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $kw = Get-MatchedCheatKeyword -Text $_.Name
+            if ($kw) { $alerts += "FAILURE: Startup item [$kw] -> $($_.FullName)" }
+        }
+    }
+
+    try {
+        Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.State -ne 'Disabled' } | ForEach-Object {
+            $task = $_
+            $actions = @($task.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" })
+            $combined = "$($task.TaskName) $($actions -join ' ')"
+            $kw = Get-MatchedCheatKeyword -Text $combined
+            if ($kw) {
+                $alerts += "FAILURE: Scheduled task [$kw] '$($task.TaskName)' -> $($actions -join '; ')"
+            }
+        }
+    } catch {
+        $alerts += 'WARNING: Could not enumerate scheduled tasks.'
+    }
+
+    if ($alerts.Count -eq 0) { $alerts += 'SUCCESS: No suspicious autorun/persistence entries found.' }
+    return @($alerts | Select-Object -Unique)
+}
+
+function Get-SuspiciousDriverAlerts {
+    # Automated equivalent of manually browsing WinObj's driver/device-object list: checks
+    # loaded kernel drivers for cheat-keyword matches, unusual load locations, and invalid
+    # signatures - the class of thing kernel-mode cheat/injector drivers show up as.
+    $alerts = @()
+
+    try {
+        $drivers = Get-CimInstance -ClassName Win32_SystemDriver -ErrorAction Stop | Where-Object { $_.State -eq 'Running' }
+    } catch {
+        $alerts += 'WARNING: Could not enumerate kernel drivers.'
+        return $alerts
+    }
+
+    foreach ($drv in $drivers) {
+        $rawPath = [string]$drv.PathName
+        if ([string]::IsNullOrWhiteSpace($rawPath)) { continue }
+
+        $resolvedPath = ($rawPath -replace '^\\SystemRoot\\', "$($env:SystemRoot)\" -replace '^\\\?\?\\', '').Trim('"')
+
+        $kw = Get-MatchedCheatKeyword -Text $resolvedPath
+        if (-not $kw) { $kw = Get-MatchedCheatKeyword -Text $drv.Name }
+
+        if ($kw) {
+            $alerts += "FAILURE: Suspicious kernel driver [$kw] $($drv.Name) -> $resolvedPath"
+            continue
+        }
+
+        if (-not (Test-TrustedProcessPath -ExecutablePath $resolvedPath)) {
+            $sigOk = $false
+            if (Test-Path -LiteralPath $resolvedPath -ErrorAction SilentlyContinue) {
+                try {
+                    $sig = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -FilePath $resolvedPath -ErrorAction Stop
+                    $sigOk = ($sig.Status -eq 'Valid')
+                } catch {}
+            }
+            if (-not $sigOk) {
+                $alerts += "WARNING: Unsigned kernel driver in unusual location: $($drv.Name) -> $resolvedPath"
+            }
+        }
+    }
+
+    if ($alerts.Count -eq 0) { $alerts += 'SUCCESS: No suspicious kernel drivers detected.' }
+    return @($alerts | Select-Object -Unique)
 }
 
 function Test-MasqueradeProcessPath {
@@ -1634,11 +1813,22 @@ if (-not $registryHit) {
     $passedChecks++
 }
 
-# Additional read-only integrity/security checks.
 $moduleIntegrityOutput = @(Get-PowerShellModuleIntegrityAlerts)
 $powerShellBinaryOutput = @(Get-PowerShellBinaryIntegrityAlerts)
 $additionalMemoryIntegrityOutput = @(Get-MemoryIntegrityAlerts)
 $activeThreatOutput = @(Get-ActiveDefenderThreatAlerts)
+
+$totalChecks++
+$bamHistoryOutput = @(Get-BamHistoryAlerts)
+if (-not ($bamHistoryOutput | Where-Object { $_ -like 'FAILURE*' })) { $passedChecks++ }
+
+$totalChecks++
+$persistenceOutput = @(Get-PersistenceAlerts)
+if (-not ($persistenceOutput | Where-Object { $_ -like 'FAILURE*' })) { $passedChecks++ }
+
+$totalChecks++
+$driverOutput = @(Get-SuspiciousDriverAlerts)
+if (-not ($driverOutput | Where-Object { $_ -like 'FAILURE*' })) { $passedChecks++ }
 
 Write-Section "Modules" $moduleOutput
 Write-Section "CPU & GPU Detections" $cpuGpuOutput
@@ -1656,6 +1846,9 @@ Write-Section "PowerShell Module Integrity" $moduleIntegrityOutput
 Write-Section "PowerShell Binary Integrity" $powerShellBinaryOutput
 Write-Section "Memory Integrity (HVCI)" $additionalMemoryIntegrityOutput
 Write-Section "Active Defender Threats" $activeThreatOutput
+Write-Section "Execution History (BAM/DAM)" $bamHistoryOutput
+Write-Section "Autorun / Persistence" $persistenceOutput
+Write-Section "Kernel Drivers" $driverOutput
 
 if ($totalChecks -ne 0) { $successRate = [math]::Round(($passedChecks / $totalChecks) * 100) } else { $successRate = 0 }
 Write-Host "Overall Success Rate: $successRate%" -ForegroundColor Cyan
