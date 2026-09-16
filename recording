@@ -5,7 +5,7 @@ foreach ($__n in @(
     'Invoke-WebRequest','Invoke-RestMethod','Invoke-Expression','Test-Path','Get-Item',
     'Get-ChildItem','Get-ItemProperty','Get-ItemPropertyValue','Get-CimInstance','Get-WmiObject',
     'Get-Process','Start-Process','Get-Service','Get-WinEvent','Get-AuthenticodeSignature',
-    'Get-MpComputerStatus','Get-MpPreference','Get-Module','New-Item','Remove-Item','Add-Content'
+    'Get-Module','New-Item','Remove-Item','Add-Content'
 )) {
     Microsoft.PowerShell.Management\Remove-Item -Path "Alias:\$__n"    -Force -ErrorAction SilentlyContinue
     Microsoft.PowerShell.Management\Remove-Item -Path "Function:\$__n" -Force -ErrorAction SilentlyContinue
@@ -13,7 +13,7 @@ foreach ($__n in @(
 
 Clear-Host
 
-$script:RoRVersion = '1.0.1'
+$script:RoRVersion = '1.7.2'
 
 function Disable-ConsoleQuickEdit {
     try {
@@ -108,6 +108,8 @@ function Write-Section {
         if ($line -like "SUCCESS*") { Write-Host $line -ForegroundColor Green }
         elseif ($line -like "FAILURE*") { Write-Host $line -ForegroundColor Red }
         elseif ($line -like "WARNING*") { Write-Host $line -ForegroundColor Yellow }
+        elseif ($line -like "INFO*") { Write-Host $line -ForegroundColor DarkGray }
+        else { Write-Host $line -ForegroundColor Gray }
     }
     Write-Host ""
 }
@@ -212,8 +214,6 @@ function Start-RoRExternalTool {
         return $false
     }
 
-    # Never execute a downloaded external tool unless its Authenticode signature
-    # validates and identifies Microsoft as the signer.
     if (-not (Test-SignedMicrosoftFile -Path $exe)) {
         Write-Host "WARNING: $Name rejected because its Microsoft Authenticode signature could not be validated." -ForegroundColor Yellow
         return $false
@@ -237,11 +237,96 @@ function Start-RoRExternalTool {
     }
 }
 
+$script:RoRModuleState = @{}
+$script:DefenderAvailable = $false
+
+function Initialize-RoRModules {
+    $results = @()
+
+    $moduleSpecs = @(
+        @{ Name = 'Microsoft.PowerShell.Management'; Required = $true;  Label = 'PowerShell Management' },
+        @{ Name = 'Microsoft.PowerShell.Utility';   Required = $true;  Label = 'PowerShell Utility' },
+        @{ Name = 'Microsoft.PowerShell.Security';  Required = $true;  Label = 'PowerShell Security' },
+        @{ Name = 'CimCmdlets';                     Required = $true;  Label = 'CIM cmdlets' },
+        @{ Name = 'ScheduledTasks';                 Required = $true;  Label = 'Scheduled Tasks' },
+        @{ Name = 'Defender';                       Required = $true;  Label = 'Windows Defender' },
+        @{ Name = 'Microsoft.PowerShell.Operation.Validation'; Required = $false; Label = 'Operation.Validation' },
+        @{ Name = 'PackageManagement';              Required = $false; Label = 'PackageManagement' },
+        @{ Name = 'PowerShellGet';                  Required = $false; Label = 'PowerShellGet' },
+        @{ Name = 'PSReadLine';                     Required = $false; Label = 'PSReadLine' },
+        @{ Name = 'Pester';                         Required = $false; Label = 'Pester' }
+    )
+
+    foreach ($spec in $moduleSpecs) {
+        $name = $spec.Name
+        $required = [bool]$spec.Required
+        $label = $spec.Label
+        $available = @()
+
+        try {
+            $available = @(Microsoft.PowerShell.Core\Get-Module -ListAvailable -Name $name -ErrorAction SilentlyContinue)
+        } catch {}
+
+        if ($available.Count -eq 0) {
+            $script:RoRModuleState[$name] = $false
+            if ($required) {
+                $results += "FAILURE: Required module unavailable -> $label ($name)"
+            } else {
+                $results += "INFO: Optional module not installed -> $label ($name)"
+            }
+            continue
+        }
+
+        try {
+            Microsoft.PowerShell.Core\Import-Module -Name $name -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+        } catch {
+            $script:RoRModuleState[$name] = $false
+            if ($required) {
+                $results += "FAILURE: Required module could not be imported -> $label ($name)"
+            } else {
+                $results += "WARNING: Optional module could not be imported -> $label ($name)"
+            }
+            continue
+        }
+
+        if (Microsoft.PowerShell.Core\Get-Module -Name $name -ErrorAction SilentlyContinue) {
+            $script:RoRModuleState[$name] = $true
+            $results += "SUCCESS: Module available -> $label"
+        } else {
+            $script:RoRModuleState[$name] = $false
+            if ($required) {
+                $results += "FAILURE: Required module did not load -> $label ($name)"
+            } else {
+                $results += "WARNING: Optional module did not load -> $label ($name)"
+            }
+        }
+    }
+
+    $script:DefenderAvailable = $false
+    if ($script:RoRModuleState.ContainsKey('Defender') -and $script:RoRModuleState['Defender']) {
+        $defenderCommands = @('Get-MpComputerStatus', 'Get-MpPreference', 'Get-MpThreat')
+        $missing = @()
+        foreach ($commandName in $defenderCommands) {
+            if (-not (Microsoft.PowerShell.Core\Get-Command -Name $commandName -ErrorAction SilentlyContinue)) {
+                $missing += $commandName
+            }
+        }
+        if ($missing.Count -eq 0) {
+            $script:DefenderAvailable = $true
+            $results += 'SUCCESS: Windows Defender cmdlets available'
+        } else {
+            $results += "FAILURE: Defender module loaded but cmdlets unavailable -> $($missing -join ', ')"
+        }
+    }
+
+    return $results
+}
+
 function Get-Exclusions {
     $list = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 
     try {
-        $prefs = Get-MpPreference -ErrorAction Stop
+        $prefs = Defender\Get-MpPreference -ErrorAction Stop
         foreach ($item in @($prefs.ExclusionPath) + @($prefs.ExclusionProcess) + @($prefs.ExclusionExtension)) {
             if ($item) { [void]$list.Add([string]$item) }
         }
@@ -360,8 +445,13 @@ function Get-AllowedDefenderThreats {
 function Get-DefenderStatusAlerts {
     $alerts = @()
 
+    if (-not $script:DefenderAvailable) {
+        $alerts += 'WARNING: Windows Defender PowerShell module/cmdlets unavailable'
+        return $alerts
+    }
+
     try {
-        $def = Get-MpComputerStatus -ErrorAction Stop
+        $def = Defender\Get-MpComputerStatus -ErrorAction Stop
         if (-not $def.RealTimeProtectionEnabled) {
             $alerts += 'FAILURE: Real-time protection disabled'
         }
@@ -439,7 +529,6 @@ function Get-PowerShellModuleIntegrityAlerts {
                 Get-ChildItem -LiteralPath $moduleDir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
                     $file = $_
 
-                    # Only inspect executable/code-bearing module files.
                     if ($file.Extension -notmatch '(?i)^\.(ps1|psm1|psd1|dll|exe|ps1xml|cdxml)$') {
                         return
                     }
@@ -460,8 +549,6 @@ function Get-PowerShellModuleIntegrityAlerts {
                         return
                     }
 
-                    # Unsigned script/module files are not automatically evidence of tampering;
-                    # catalog/Authenticode signing is not guaranteed for every script file.
                     if ($sig.Status -eq 'NotSigned') {
                         $alerts += "WARNING: Unsigned PowerShell module file -> $($file.FullName)"
                     } else {
@@ -538,8 +625,13 @@ function Get-MemoryIntegrityAlerts {
 function Get-ActiveDefenderThreatAlerts {
     $alerts = @()
 
+    if (-not $script:DefenderAvailable) {
+        $alerts += 'WARNING: Windows Defender PowerShell module/cmdlets unavailable'
+        return $alerts
+    }
+
     try {
-        $threats = @(Get-MpThreat -ErrorAction Stop | Where-Object {
+        $threats = @(Defender\Get-MpThreat -ErrorAction Stop | Where-Object {
             $_.Status -eq 'Active'
         })
 
@@ -668,10 +760,6 @@ function Get-CheatFolderHits {
 }
 
 function Get-BamHistoryAlerts {
-    # Full BAM/DAM execution-history scan: unlike Get-BamRegistryFingerprints (which only
-    # baselines keys to catch deletions during a match), this reconstructs the historical
-    # timestamped execution record and flags entries against the cheat-keyword list and
-    # Authenticode signature, for a one-time pre-match audit of what has run on this machine.
     $alerts = @()
     $roots = @(
         'SYSTEM\CurrentControlSet\Services\bam\State\UserSettings',
@@ -693,10 +781,6 @@ function Get-BamHistoryAlerts {
                     $raw = $sidKey.GetValue($valueName)
                     if (-not $raw -or $raw.Length -lt 8) { continue }
 
-                    # Heuristic: BAM stores device paths (\Device\HarddiskVolumeN\...).
-                    # Resolving the volume number to a drive letter reliably needs extra
-                    # lookups; as a best-effort heuristic (same one manual BAM tools use)
-                    # we assume the system volume, which is right in the common case.
                     $resolvedPath = $null
                     if ($valueName -match '^\\Device\\HarddiskVolume\d+\\(.+)$') {
                         $resolvedPath = Join-Path $env:SystemDrive $matches[1]
@@ -797,9 +881,6 @@ function Get-TamperLogEvents {
             $filter.StartTime = $Since
             Get-WinEvent -FilterHashtable $filter -ErrorAction Stop | ForEach-Object { $events += $_ }
         } catch {
-            # "No events were found..." just means nothing to report yet - that's the
-            # normal case, not a failure. Anything else (access denied, log missing,
-            # etc.) means this check is degraded, and that's worth surfacing once.
             if ($_.Exception.Message -notmatch '(?i)no events were found') {
                 $warnKey = "winevent|$($filter.LogName)"
                 if (-not $script:TamperLogFailureWarned.ContainsKey($warnKey)) {
@@ -1049,8 +1130,15 @@ function Get-MatchedCheatKeyword {
     $lower = $Text.ToLower()
 
     if ($FolderName) {
-        foreach ($kw in ($script:CheatKeywords + $script:FolderOnlyKeywords)) {
-            if ($lower -like "*$kw*") { return $kw }
+        foreach ($kw in $script:CheatKeywords) {
+            if ($kw.Length -le 4) {
+                if (Test-KeywordTokenMatch -Text $lower -Keyword $kw) { return $kw }
+            } elseif ($lower -like "*$kw*") {
+                return $kw
+            }
+        }
+        foreach ($kw in $script:FolderOnlyKeywords) {
+            if (Test-KeywordTokenMatch -Text $lower -Keyword $kw) { return $kw }
         }
         return $null
     }
@@ -1066,9 +1154,6 @@ function Get-MatchedCheatKeyword {
 }
 
 function Get-PersistenceAlerts {
-    # Automated equivalent of manually reviewing Sysinternals Autoruns: checks the common
-    # persistence points (Run keys, Startup folders, Scheduled Tasks) against the same
-    # cheat-keyword list used elsewhere, without needing a human to eyeball a GUI tool.
     $alerts = @()
 
     $runKeys = @(
@@ -1138,9 +1223,70 @@ function Resolve-ExecutablePathFromCommandLine {
     return $null
 }
 
+function Normalize-KernelDriverPath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+
+    $path = [Environment]::ExpandEnvironmentVariables($Path.Trim().Trim('"'))
+
+    if ($path.StartsWith('\??\', [StringComparison]::OrdinalIgnoreCase)) {
+        $path = $path.Substring(4)
+    } elseif ($path.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) {
+        $path = $path.Substring(4)
+    }
+
+    if ($path.StartsWith('\SystemRoot\', [StringComparison]::OrdinalIgnoreCase)) {
+        $path = $env:SystemRoot + $path.Substring(11)
+    } elseif ($path.StartsWith('SystemRoot\', [StringComparison]::OrdinalIgnoreCase)) {
+        $path = Join-Path $env:SystemRoot $path.Substring(11)
+    } elseif ($path.StartsWith('System32\', [StringComparison]::OrdinalIgnoreCase)) {
+        $path = Join-Path $env:SystemRoot $path
+    }
+
+    return $path.Trim('"')
+}
+
+function Resolve-KernelDriverImagePath {
+    param(
+        [string]$ServiceName,
+        [string]$PathName
+    )
+
+    $candidates = New-Object 'System.Collections.Generic.List[string]'
+
+    $direct = Resolve-ExecutablePathFromCommandLine -CommandLine $PathName
+    if ($direct) { [void]$candidates.Add($direct) }
+
+    if ($ServiceName) {
+        try {
+            $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+            $imagePath = Get-ItemPropertyValue -Path $regPath -Name ImagePath -ErrorAction Stop
+            $fromRegistry = Resolve-ExecutablePathFromCommandLine -CommandLine ([string]$imagePath)
+            if ($fromRegistry) { [void]$candidates.Add($fromRegistry) }
+        } catch {}
+    }
+
+    foreach ($candidate in ($candidates | Select-Object -Unique)) {
+        $normalized = Normalize-KernelDriverPath -Path $candidate
+        if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
+
+        try {
+            if (Test-Path -LiteralPath $normalized -PathType Leaf -ErrorAction Stop) {
+                return (Get-Item -LiteralPath $normalized -Force -ErrorAction Stop).FullName
+            }
+        } catch {}
+    }
+
+    foreach ($candidate in ($candidates | Select-Object -Unique)) {
+        $normalized = Normalize-KernelDriverPath -Path $candidate
+        if ($normalized) { return $normalized }
+    }
+
+    return $null
+}
+
 function Get-SuspiciousDriverAlerts {
-    # Checks loaded kernel drivers for cheat-keyword matches and signature problems.
-    # A normal installation path is never treated as proof that a driver is trusted.
     $alerts = @()
 
     try {
@@ -1153,32 +1299,34 @@ function Get-SuspiciousDriverAlerts {
 
     foreach ($drv in $drivers) {
         $rawPath = [string]$drv.PathName
-        if ([string]::IsNullOrWhiteSpace($rawPath)) { continue }
+        $resolvedPath = Resolve-KernelDriverImagePath -ServiceName ([string]$drv.Name) -PathName $rawPath
 
-        $resolvedPath = Resolve-ExecutablePathFromCommandLine -CommandLine $rawPath
-        if ([string]::IsNullOrWhiteSpace($resolvedPath)) { continue }
-
-        $resolvedPath = ($resolvedPath -replace '^\\SystemRoot\\', "$($env:SystemRoot)\" -replace '^\\\?\?\\', '').Trim('"')
-
-        $kw = Get-MatchedCheatKeyword -Text $resolvedPath
-        if (-not $kw) { $kw = Get-MatchedCheatKeyword -Text $drv.Name }
+        $kw = Get-MatchedCheatKeyword -Text $drv.Name
+        if (-not $kw) { $kw = Get-MatchedCheatKeyword -Text $drv.DisplayName }
+        if (-not $kw) { $kw = Get-MatchedCheatKeyword -Text $resolvedPath }
 
         if ($kw) {
             $alerts += "FAILURE: Suspicious kernel driver [$kw] $($drv.Name) -> $resolvedPath"
             continue
         }
 
+        if ([string]::IsNullOrWhiteSpace($resolvedPath)) {
+            $alerts += "WARNING: Could not resolve kernel driver image path: $($drv.Name)"
+            continue
+        }
+
         if (-not (Test-Path -LiteralPath $resolvedPath -PathType Leaf -ErrorAction SilentlyContinue)) {
-            $alerts += "WARNING: Could not verify kernel driver file: $($drv.Name) -> $resolvedPath"
+            $alerts += "WARNING: Kernel driver image not found/readable: $($drv.Name) -> $resolvedPath"
             continue
         }
 
         try {
-            $sig = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -FilePath $resolvedPath -ErrorAction Stop
-            switch ([string]$sig.Status) {
+            $sig = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $resolvedPath -ErrorAction Stop
+            $status = [string]$sig.Status
+
+            switch ($status) {
                 'Valid' {
-                    # Validly signed third-party drivers are allowed; Microsoft is not
-                    # required because legitimate hardware/software vendors sign drivers.
+                    # Validly signed third-party drivers are acceptable.
                 }
                 'NotSigned' {
                     $alerts += "WARNING: Unsigned kernel driver: $($drv.Name) -> $resolvedPath"
@@ -1187,10 +1335,18 @@ function Get-SuspiciousDriverAlerts {
                     $alerts += "FAILURE: Kernel driver signature hash mismatch: $($drv.Name) -> $resolvedPath"
                 }
                 'NotTrusted' {
-                    $alerts += "FAILURE: Kernel driver signature not trusted: $($drv.Name) -> $resolvedPath"
+                    if ($sig.SignerCertificate) {
+                        $subject = [string]$sig.SignerCertificate.Subject
+                        $alerts += "INFO: Kernel driver has a signature, but Windows could not establish trust: $($drv.Name) -> $resolvedPath [$subject]"
+                    } else {
+                        $alerts += "WARNING: Kernel driver signature could not be trusted: $($drv.Name) -> $resolvedPath"
+                    }
+                }
+                'UnknownError' {
+                    $alerts += "WARNING: Kernel driver signature verification returned UnknownError: $($drv.Name) -> $resolvedPath"
                 }
                 default {
-                    $alerts += "WARNING: Kernel driver signature status is $($sig.Status): $($drv.Name) -> $resolvedPath"
+                    $alerts += "WARNING: Kernel driver signature status is $status: $($drv.Name) -> $resolvedPath"
                 }
             }
         } catch {
@@ -1321,7 +1477,7 @@ function Get-ProcessSuspiciousReasons {
     $nameKw = Get-MatchedCheatKeyword -Text $ProcessName
     if ($nameKw) { [void]$reasons.Add($nameKw) }
 
-    if ($ExecutablePath -and -not (Test-TrustedProcessPath -ExecutablePath $ExecutablePath)) {
+    if ($ExecutablePath) {
         $pathKw = Get-MatchedCheatKeyword -Text $ExecutablePath
         if ($pathKw) { [void]$reasons.Add($pathKw) }
     }
@@ -1409,7 +1565,7 @@ $script:ExternalReaderAllowlist = @(
     'bloxstrap', 'fishstrap', 'lunarstrap',
     'msmpeng', 'nissrv', 'securityhealthservice', 'mpdefendercoreservice',
     'csrss', 'lsass', 'wininit', 'services', 'searchindexer', 'wmiprvse',
-    'powershell', 'pwsh', 'explorer'
+    'procexp', 'procexp64', 'taskmgr', 'perfmon', 'resmon'
 )
 
 $script:CaptureWindowAllowlist = @(
@@ -1678,9 +1834,6 @@ $moduleOutput          = @()
 $cpuGpuOutput          = @()
 $processOutput         = @()
 $keyAuthOutput         = @()
-$powershellSigOutput   = @()
-$osOutput              = @()
-$vmOutput              = @()
 $defenderOutput        = @()
 $exclusionsOutput      = @()
 $allowedThreatsOutput  = @()
@@ -1694,29 +1847,8 @@ $powerShellBinaryOutput = @()
 $activeThreatOutput     = @()
 
 $totalChecks++
-$requiredCommands = @(
-    'Get-CimInstance',
-    'Get-AuthenticodeSignature',
-    'Get-MpComputerStatus',
-    'Get-MpPreference',
-    'Get-MpThreat',
-    'Get-ScheduledTask',
-    'Register-WmiEvent'
-)
-$missingCommands = @()
-foreach ($commandName in $requiredCommands) {
-    if (-not (Get-Command $commandName -ErrorAction SilentlyContinue)) {
-        $missingCommands += $commandName
-    }
-}
-if ($missingCommands.Count -eq 0) {
-    $moduleOutput += "SUCCESS: Required PowerShell commands are available"
-    $passedChecks++
-} else {
-    foreach ($missing in $missingCommands) {
-        $moduleOutput += "FAILURE: Required command unavailable -> $missing"
-    }
-}
+$moduleOutput = @(Initialize-RoRModules)
+if (Test-AlertSetPassed $moduleOutput) { $passedChecks++ }
 
 
 $totalChecks++
@@ -1735,19 +1867,24 @@ try {
 
 $totalChecks++
 try {
-    $def = Get-MpComputerStatus
-    if ($def.RealTimeProtectionEnabled) {
-        $defenderOutput += "SUCCESS: Windows Defender real-time protection enabled."
-        $passedChecks++
+    if (-not $script:DefenderAvailable) {
+        $defenderOutput += 'WARNING: Windows Defender status check unavailable because the Defender module/cmdlets could not be loaded.'
     } else {
-        $defenderOutput += "FAILURE: Windows Defender real-time protection disabled."
-    }
+        $def = Defender\Get-MpComputerStatus -ErrorAction Stop
+        if ($def.RealTimeProtectionEnabled) {
+            $defenderOutput += "SUCCESS: Windows Defender real-time protection enabled."
+        } else {
+            $defenderOutput += "FAILURE: Windows Defender real-time protection disabled."
+        }
 
-    if (-not $def.IsTamperProtected) {
-        $defenderOutput += "WARNING: Tamper protection disabled."
+        if (-not $def.IsTamperProtected) {
+            $defenderOutput += "WARNING: Tamper protection disabled."
+        }
+
+        if (Test-AlertSetPassed $defenderOutput) { $passedChecks++ }
     }
 } catch {
-    $defenderOutput += "WARNING: Unable to query Defender."
+    $defenderOutput += "WARNING: Unable to query Defender: $($_.Exception.Message)"
 }
 
 foreach ($disableKey in @(
@@ -1765,8 +1902,12 @@ try {
     $allExclusions = @(Get-Exclusions)
 
     if ($allExclusions.Count -eq 0) {
-        $exclusionsOutput += "SUCCESS: No Defender exclusions."
-        $passedChecks++
+        if ($script:DefenderAvailable) {
+            $exclusionsOutput += "SUCCESS: No Defender exclusions."
+            $passedChecks++
+        } else {
+            $exclusionsOutput += "WARNING: Defender exclusions could not be fully verified because the Defender module/cmdlets are unavailable."
+        }
     } else {
         foreach ($excl in $allExclusions) {
             $exclKw = Get-MatchedCheatKeyword -Text $excl
@@ -1812,7 +1953,7 @@ try {
 
 $totalChecks++
 $nvidiaOutput += @(Get-NvidiaShadowPlayFtsAlerts)
-$passedChecks++
+if (Test-AlertSetPassed $nvidiaOutput) { $passedChecks++ }
 
 $totalChecks++
 $procHits = @(Get-SuspiciousProcessHits)
@@ -1856,7 +1997,7 @@ foreach ($line in (Get-WindhawkStep1Alerts)) {
 
 $totalChecks++
 $externalOutput += @(Get-ExternalCheatHits)
-if (-not ($externalOutput | Where-Object { $_ -like 'FAILURE*' })) { $passedChecks++ }
+if (Test-AlertSetPassed $externalOutput) { $passedChecks++ }
 
 $totalChecks++
 $registryHit = $false
@@ -1872,7 +2013,6 @@ if (-not $registryHit) {
     $passedChecks++
 }
 
-# Additional read-only integrity/security checks.
 $moduleIntegrityOutput = @(Get-PowerShellModuleIntegrityAlerts)
 $totalChecks++
 if (Test-AlertSetPassed $moduleIntegrityOutput) { $passedChecks++ }
@@ -1891,15 +2031,15 @@ if (Test-AlertSetPassed $activeThreatOutput) { $passedChecks++ }
 
 $totalChecks++
 $bamHistoryOutput = @(Get-BamHistoryAlerts)
-if (-not ($bamHistoryOutput | Where-Object { $_ -like 'FAILURE*' })) { $passedChecks++ }
+if (Test-AlertSetPassed $bamHistoryOutput) { $passedChecks++ }
 
 $totalChecks++
 $persistenceOutput = @(Get-PersistenceAlerts)
-if (-not ($persistenceOutput | Where-Object { $_ -like 'FAILURE*' })) { $passedChecks++ }
+if (Test-AlertSetPassed $persistenceOutput) { $passedChecks++ }
 
 $totalChecks++
 $driverOutput = @(Get-SuspiciousDriverAlerts)
-if (-not ($driverOutput | Where-Object { $_ -like 'FAILURE*' })) { $passedChecks++ }
+if (Test-AlertSetPassed $driverOutput) { $passedChecks++ }
 
 Write-Section "Modules" $moduleOutput
 Write-Section "CPU & GPU Detections" $cpuGpuOutput
@@ -1921,8 +2061,6 @@ Write-Section "Execution History (BAM/DAM)" $bamHistoryOutput
 Write-Section "Autorun / Persistence" $persistenceOutput
 Write-Section "Kernel Drivers" $driverOutput
 
-# Recalculate the displayed pass rate from the actual section results so that
-# warnings/failures cannot be accidentally counted as passes.
 $checkSets = @(
     $moduleOutput,
     $cpuGpuOutput,
@@ -2036,6 +2174,7 @@ $reportedRegistryTools = @{}
 $reportedWindhawkHits = @{}
 $reportedDefenderRegChanges = @{}
 $reportedExternalHits = @{}
+$reportedActiveThreats = @{}
 $baselineDefenderReg = Get-DefenderRegistryFingerprints
 $defenderRegLabels = Get-DefenderRegistryMonitorLabels
 $lastProcessSnapshot = Get-ProcessSnapshot
@@ -2181,7 +2320,10 @@ while ($true) {
         $activeThreatScanCounter = 0
         foreach ($line in (Get-ActiveDefenderThreatAlerts)) {
             if ($line -like 'SUCCESS*') { continue }
-            Write-MonitorAlert -Message $line -LogFile $logFile -Color Yellow
+            if (-not $reportedActiveThreats.ContainsKey($line)) {
+                $reportedActiveThreats[$line] = $true
+                Write-MonitorAlert -Message $line -LogFile $logFile -Color Yellow
+            }
         }
     }
 
