@@ -1346,7 +1346,7 @@ function Get-SuspiciousDriverAlerts {
                     $alerts += "WARNING: Kernel driver signature verification returned UnknownError: $($drv.Name) -> $resolvedPath"
                 }
                 default {
-                    $alerts += "WARNING: Kernel driver signature status is $status: $($drv.Name) -> $resolvedPath"
+                    $alerts += "WARNING: Kernel driver signature status is ${status}: $($drv.Name) -> $resolvedPath"
                 }
             }
         } catch {
@@ -1806,6 +1806,7 @@ function Get-ExternalCheatHits {
 
 $script:BaselineBamKeys = @{}
 $script:BaselinePrefetchFiles = @{}
+$script:MainLoopFailureWarned = @{}
 
 
 function Test-AlertSetPassed {
@@ -2252,7 +2253,13 @@ while ($true) {
         }
 
         $previousExclusions = $currentExclusions
-    } catch {}
+    } catch {
+        $warnKey = "exclusions|$($_.Exception.Message)"
+        if (-not $script:MainLoopFailureWarned.ContainsKey($warnKey)) {
+            $script:MainLoopFailureWarned[$warnKey] = $true
+            Write-MonitorAlert -Message "WARNING: Exclusion tracking failed ($($_.Exception.Message))" -LogFile $logFile -Color Yellow
+        }
+    }
 
     foreach ($change in (Get-CursorSchemeChanges -Baseline $baselineCursorScheme -Current (Get-CursorSchemeState))) {
         if (-not $reportedCursorChanges.ContainsKey($change)) {
@@ -2312,7 +2319,13 @@ while ($true) {
                 $label = if ($defenderRegLabels.ContainsKey($root)) { $defenderRegLabels[$root] } else { $root }
                 Write-MonitorAlert -Message "$label changed: $currentFp" -LogFile $logFile -Color Yellow
             }
-        } catch {}
+        } catch {
+            $warnKey = "defender|$($_.Exception.Message)"
+            if (-not $script:MainLoopFailureWarned.ContainsKey($warnKey)) {
+                $script:MainLoopFailureWarned[$warnKey] = $true
+                Write-MonitorAlert -Message "WARNING: Defender status/registry tracking failed ($($_.Exception.Message))" -LogFile $logFile -Color Yellow
+            }
+        }
     }
 
         $activeThreatScanCounter++
