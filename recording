@@ -1067,7 +1067,7 @@ function Get-MainCplProcessHits {
 
 $script:CheatKeywords = @(
     'matcha', 'isabelle', 'severe', 'aegis', 'lattice', 'spectre', 'matrix', 'clarity', 'loader', 'photon', 'valex', 'aimmy',
-    'keyauth', 'melatonin', 'evolve', 'serotonin', 'dx9ware', 'unicore', 'monolith', 'skript',
+    'keyauth', 'melatonin', 'evolve', 'serotonin', 'ghostify', 'dx9ware', 'unicore', 'monolith', 'skript',
     'ntfsdump', 'atlanta', 'eulen', 'hammafia', 'redengine', 'susano', 'bypass'
 )
 
