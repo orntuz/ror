@@ -1336,11 +1336,34 @@ function Resolve-ExecutablePathFromCommandLine {
 
     if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $null }
 
-    $match = [regex]::Match($CommandLine, '^\s*"([^"]+)"')
+    $expanded = [Environment]::ExpandEnvironmentVariables($CommandLine.Trim())
+
+    # Most service ImagePath values with spaces are quoted. Preserve that exact path.
+    $match = [regex]::Match($expanded, '^\s*"([^"]+)"')
     if ($match.Success) { return $match.Groups[1].Value }
 
-    $match = [regex]::Match($CommandLine, '^\s*(\S+)')
-    if ($match.Success) { return $match.Groups[1].Value }
+    # Kernel driver services normally point to a .sys image. Capture the complete
+    # path even when Windows stores the ImagePath without quotes and the path has spaces.
+    $match = [regex]::Match($expanded, '^\s*(?<path>.*?\.sys)(?:\s+.*)?$', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($match.Success) { return $match.Groups['path'].Value.Trim().Trim('"') }
+
+    # Fallback for non-standard driver image names: progressively test whitespace-
+    # separated prefixes so paths such as "C:\Program Files\..." are not truncated to C:\Program.
+    $tokens = $expanded -split '\s+'
+    if ($tokens.Count -gt 1) {
+        for ($i = $tokens.Count; $i -ge 1; $i--) {
+            $candidate = ($tokens[0..($i - 1)] -join ' ').Trim().Trim('"')
+            if (-not $candidate) { continue }
+            try {
+                if (Test-Path -LiteralPath $candidate -PathType Leaf -ErrorAction Stop) {
+                    return $candidate
+                }
+            } catch {}
+        }
+    }
+
+    $match = [regex]::Match($expanded, '^\s*(\S+)')
+    if ($match.Success) { return $match.Groups[1].Value.Trim('"') }
 
     return $null
 }
