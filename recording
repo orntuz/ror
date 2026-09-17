@@ -13,7 +13,7 @@ foreach ($__n in @(
 
 Clear-Host
 
-$script:RoRVersion = '1.8.2'
+$script:RoRVersion = '1.8.3'
 
 function Disable-ConsoleQuickEdit {
     try {
@@ -842,13 +842,48 @@ function Get-PowerShellBinaryIntegrityAlerts {
 function Get-MemoryIntegrityAlerts {
     $alerts = @()
     $regPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity'
+    $deviceGuardChecked = $false
 
     try {
-        $enabled = Get-ItemPropertyValue -Path $regPath -Name 'Enabled' -ErrorAction Stop
-        if ($enabled -eq 1) {
-            $alerts += 'SUCCESS: Memory Integrity (HVCI) enabled'
+        $deviceGuard = Get-CimInstance -Namespace 'root\Microsoft\Windows\DeviceGuard' `
+            -ClassName 'Win32_DeviceGuard' -ErrorAction Stop
+        $deviceGuardChecked = $true
+
+        $running = @($deviceGuard.SecurityServicesRunning) -contains 2
+        $configured = @($deviceGuard.SecurityServicesConfigured) -contains 2
+
+        if ($running) {
+            $alerts += 'SUCCESS: Memory Integrity (HVCI) enabled and running'
+            return $alerts
+        }
+
+        if ($configured) {
+            $alerts += 'FAILURE: Memory Integrity (HVCI) is configured but not running'
+            return $alerts
+        }
+    } catch {
+        # Fall back to the registry below.
+    }
+
+    try {
+        if (Test-Path -LiteralPath $regPath -PathType Container -ErrorAction Stop) {
+            $enabled = Get-ItemPropertyValue -Path $regPath -Name 'Enabled' -ErrorAction Stop
+            if ($enabled -eq 1) {
+                if ($deviceGuardChecked) {
+                    $alerts += 'WARNING: Memory Integrity (HVCI) is configured, but runtime state could not be confirmed'
+                } else {
+                    $alerts += 'WARNING: Memory Integrity (HVCI) is configured in the registry, but runtime state could not be confirmed'
+                }
+            } else {
+                $alerts += 'FAILURE: Memory Integrity (HVCI) disabled'
+            }
+            return $alerts
+        }
+
+        if ($deviceGuardChecked) {
+            $alerts += 'FAILURE: Memory Integrity (HVCI) is not configured/running'
         } else {
-            $alerts += 'WARNING: Memory Integrity (HVCI) disabled'
+            $alerts += 'WARNING: Memory Integrity (HVCI) status unavailable'
         }
     } catch {
         $alerts += 'WARNING: Memory Integrity (HVCI) status unavailable'
@@ -2699,17 +2734,9 @@ try {
 }
 
 $totalChecks++
-try {
-    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"
-    $enabled = Get-ItemPropertyValue -Path $regPath -Name Enabled
-    if ($enabled -eq 1) {
-        $memoryIntegrityOutput += "SUCCESS: Memory Integrity enabled."
-        $passedChecks++
-    } else {
-        $memoryIntegrityOutput += "FAILURE: Memory Integrity disabled."
-    }
-} catch {
-    $memoryIntegrityOutput += "WARNING: Memory Integrity status unavailable."
+$memoryIntegrityOutput = @(Get-MemoryIntegrityAlerts)
+if (Test-AlertSetPassed $memoryIntegrityOutput) {
+    $passedChecks++
 }
 
 $totalChecks++
