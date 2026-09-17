@@ -13,7 +13,7 @@ foreach ($__n in @(
 
 Clear-Host
 
-$script:RoRVersion = '1.0.3'
+$script:RoRVersion = '1.0.2'
 
 function Disable-ConsoleQuickEdit {
     try {
@@ -556,21 +556,19 @@ function Get-ClarityDetectionAlerts {
         }
     }
 
-    $masqueradeChecks = @(
-        @{ Name = "svchost";  LegitPattern = "C:\Windows\System32\svchost.exe" },
-        @{ Name = "MsMpEng";  LegitPattern = "C:\ProgramData\Microsoft\Windows Defender\Platform\*\MsMpEng.exe" },
-        @{ Name = "TiWorker"; LegitPattern = "C:\Windows\*\TiWorker.exe" }
-    )
-    foreach ($check in $masqueradeChecks) {
-        Get-Process -Name $check.Name -ErrorAction SilentlyContinue | ForEach-Object {
+    # Use the same normalized, case-insensitive path validation as the Process Scan.
+    # The previous implementation hard-coded C:\Windows and C:\ProgramData and used
+    # wildcard matching, which could flag valid Microsoft processes when the system
+    # root or path representation differed from those hard-coded strings.
+    foreach ($processName in @('svchost', 'MsMpEng', 'TiWorker')) {
+        Get-Process -Name $processName -ErrorAction SilentlyContinue | ForEach-Object {
             try {
-                if ($_.Path -and $_.Path -notlike $check.LegitPattern) {
-                    $alerts += "FAILURE: $($check.Name).exe from suspicious path: '$($_.Path)' (PID $($_.Id))"
+                if ($_.Path -and -not (Test-ClarityExpectedProcessPath -ProcessName "$processName.exe" -ExecutablePath $_.Path)) {
+                    $alerts += "FAILURE: $processName.exe from suspicious path: '$($_.Path)' (PID $($_.Id))"
                 }
             } catch {}
         }
     }
-
     if (-not ('RoRNalCheck' -as [type])) {
         try {
             Add-Type -TypeDefinition @'
@@ -1482,6 +1480,63 @@ function Get-SuspiciousDriverAlerts {
     return @($alerts | Select-Object -Unique)
 }
 
+function Normalize-ProcessImagePath {
+    param([string]$ExecutablePath)
+
+    if ([string]::IsNullOrWhiteSpace($ExecutablePath)) { return $null }
+
+    $path = [Environment]::ExpandEnvironmentVariables($ExecutablePath.Trim().Trim('"')).Replace('/', '\')
+    if ($path.StartsWith('\??\', [StringComparison]::OrdinalIgnoreCase)) {
+        $path = $path.Substring(4)
+    } elseif ($path.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) {
+        $path = $path.Substring(4)
+    }
+
+    try {
+        if ([IO.Path]::IsPathRooted($path)) {
+            $path = [IO.Path]::GetFullPath($path)
+        }
+    } catch {}
+
+    return $path.TrimEnd('\')
+}
+
+function Test-ClarityExpectedProcessPath {
+    param(
+        [string]$ProcessName,
+        [string]$ExecutablePath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ExecutablePath)) { return $false }
+
+    $nameLower = ([string]$ProcessName).ToLower().Trim()
+    if (-not $nameLower.EndsWith('.exe')) { $nameLower += '.exe' }
+    $path = Normalize-ProcessImagePath -ExecutablePath $ExecutablePath
+    if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+
+    $root = Normalize-ProcessImagePath -ExecutablePath $env:SystemRoot
+    $programData = Normalize-ProcessImagePath -ExecutablePath $env:ProgramData
+    $leaf = Split-Path -Leaf $path
+
+    switch ($nameLower) {
+        'svchost.exe' {
+            foreach ($suffix in @('\windows\system32\svchost.exe', '\windows\syswow64\svchost.exe')) {
+                if ($path.EndsWith($suffix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+            }
+            return $false
+        }
+        'msmpeng.exe' {
+            $prefix = Join-Path $programData 'Microsoft\Windows Defender\Platform'
+            $prefix = Normalize-ProcessImagePath -ExecutablePath $prefix
+            return ($leaf -ieq 'MsMpEng.exe' -and $path.StartsWith(($prefix + '\'), [StringComparison]::OrdinalIgnoreCase))
+        }
+        'tiworker.exe' {
+            return ($leaf -ieq 'TiWorker.exe' -and $path.StartsWith(($root + '\'), [StringComparison]::OrdinalIgnoreCase) -and $path.Substring($root.Length).IndexOf('\', [StringComparison]::Ordinal) -ge 0)
+        }
+        default { return $false }
+    }
+}
+
 function Test-MasqueradeProcessPath {
     param(
         [string]$ProcessName,
@@ -1489,12 +1544,23 @@ function Test-MasqueradeProcessPath {
     )
 
     if ([string]::IsNullOrWhiteSpace($ExecutablePath)) { return $null }
-    $nameLower = $ProcessName.ToLower()
+    $nameLower = ([string]$ProcessName).ToLower()
+    if (-not $nameLower.EndsWith('.exe')) { $nameLower += '.exe' }
     if (-not $script:MasqueradeProcessPaths.ContainsKey($nameLower)) { return $null }
 
-    $pathLower = $ExecutablePath.ToLower().Replace('/', '\')
+    $path = Normalize-ProcessImagePath -ExecutablePath $ExecutablePath
+    $systemRoot = Normalize-ProcessImagePath -ExecutablePath $env:SystemRoot
+    $systemRootPrefix = $systemRoot + '\'
+
+    # Match against the actual Windows root, not a hard-coded C:\Windows string.
+    # This keeps legitimate system32/syswow64 images valid while preventing a
+    # user-controlled path that merely ends with the same filename from passing.
+    if (-not $path.StartsWith($systemRootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        return "Windows process '$ProcessName' running from non-standard path: $ExecutablePath"
+    }
+
     foreach ($legitSuffix in $script:MasqueradeProcessPaths[$nameLower]) {
-        if ($pathLower.EndsWith($legitSuffix)) { return $null }
+        if ($path.EndsWith($legitSuffix, [StringComparison]::OrdinalIgnoreCase)) { return $null }
     }
 
     return "Windows process '$ProcessName' running from non-standard path: $ExecutablePath"
@@ -1698,18 +1764,6 @@ $script:CaptureWindowAllowlist = @(
     'applicationframehost', 'systemsettings', 'shellexperiencehost'
 )
 
-$script:ExternalEvidenceWeights = @{
-    MemoryRead       = 5
-    CaptureProtected = 1
-    NonStandardPath  = 1
-    UnresolvedPath   = 1
-    KeywordMatch     = 3
-    Masquerade       = 3
-}
-
-$script:ExternalEvidenceFailureThreshold = 5
-$script:ExternalEvidenceWarningThreshold = 2
-
 function Initialize-ExternalScanApi {
     if ('RoR.ExternalScan' -as [type]) { return $true }
     try {
@@ -1877,128 +1931,12 @@ function Resolve-ProcessIdentity {
     return @{ Name = "PID $TargetPid"; Path = '' }
 }
 
-function Get-ExternalEvidenceRecord {
-    param(
-        [hashtable]$Records,
-        [int]$TargetPid
-    )
-
-    if (-not $Records.ContainsKey($TargetPid)) {
-        $info = Resolve-ProcessIdentity -TargetPid $TargetPid
-        $Records[$TargetPid] = @{
-            Pid           = $TargetPid
-            Name          = [string]$info.Name
-            Path          = [string]$info.Path
-            Score         = 0
-            Evidence      = New-Object 'System.Collections.Generic.List[string]'
-            EvidenceKeys  = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-            WindowDetails = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-        }
-    }
-
-    return $Records[$TargetPid]
-}
-
-function Add-ExternalEvidence {
-    param(
-        [hashtable]$Record,
-        [string]$Key,
-        [string]$Description,
-        [int]$Weight
-    )
-
-    if ($Weight -le 0 -or [string]::IsNullOrWhiteSpace($Key)) { return }
-    if (-not $Record.EvidenceKeys.Add($Key)) { return }
-
-    $Record.Score = [int]$Record.Score + $Weight
-    [void]$Record.Evidence.Add("$Description (+$Weight)")
-}
-
-function Add-ExternalProcessReputationEvidence {
-    param([hashtable]$Record)
-
-    $name = [string]$Record.Name
-    $path = [string]$Record.Path
-
-    $masquerade = Test-MasqueradeProcessPath -ProcessName $name -ExecutablePath $path
-    if ($masquerade) {
-        Add-ExternalEvidence -Record $Record `
-            -Key 'Masquerade' `
-            -Description 'Windows process name is running from a non-standard path' `
-            -Weight $script:ExternalEvidenceWeights.Masquerade
-    }
-
-    $keyword = Get-MatchedCheatKeyword -Text $name
-    if (-not $keyword -and $path) {
-        $keyword = Get-MatchedCheatKeyword -Text $path
-    }
-    if ($keyword) {
-        Add-ExternalEvidence -Record $Record `
-            -Key "Keyword:$keyword" `
-            -Description "matched suspicious keyword '$keyword'" `
-            -Weight $script:ExternalEvidenceWeights.KeywordMatch
-    }
-
-    if ([string]::IsNullOrWhiteSpace($path)) {
-        Add-ExternalEvidence -Record $Record `
-            -Key 'UnresolvedPath' `
-            -Description 'executable path could not be resolved' `
-            -Weight $script:ExternalEvidenceWeights.UnresolvedPath
-    }
-    elseif (-not (Test-TrustedProcessPath -ExecutablePath $path)) {
-        Add-ExternalEvidence -Record $Record `
-            -Key 'NonStandardPath' `
-            -Description 'executable is outside Windows/Program Files' `
-            -Weight $script:ExternalEvidenceWeights.NonStandardPath
-    }
-}
-
-function Get-AlertColor {
-    param([string]$Message)
-
-    if ($Message -like 'FAILURE*') { return 'Red' }
-    if ($Message -like 'WARNING*') { return 'Yellow' }
-    if ($Message -like 'INFO*') { return 'DarkGray' }
-    if ($Message -like 'SUCCESS*') { return 'Green' }
-    return 'Gray'
-}
-
-function Format-ExternalEvidenceRecord {
-    param([hashtable]$Record)
-
-    Add-ExternalProcessReputationEvidence -Record $Record
-
-    $label = "$($Record.Name) (PID $($Record.Pid))"
-    if ($Record.Path) { $label += " -> $($Record.Path)" }
-
-    $details = @($Record.Evidence)
-    if ($Record.WindowDetails.Count -gt 0) {
-        $details += "capture details: $(@($Record.WindowDetails) -join '; ')"
-    }
-
-    $detailText = if ($details.Count -gt 0) {
-        $details -join ', '
-    } else {
-        'no evidence details available'
-    }
-
-    $score = [int]$Record.Score
-    if ($score -ge $script:ExternalEvidenceFailureThreshold) {
-        return "FAILURE: External/overlay evidence score $score - $label [$detailText]"
-    }
-    if ($score -ge $script:ExternalEvidenceWarningThreshold) {
-        return "WARNING: External/overlay evidence score $score - $label [$detailText]"
-    }
-    return "INFO: External/overlay evidence score $score - $label [$detailText]"
-}
-
 function Get-ExternalCheatHits {
     if (-not (Initialize-ExternalScanApi)) {
         return 'WARNING: External scan unavailable'
     }
 
     $messages = @()
-    $records = @{}
 
     $targets = @(Get-RobloxTargetIds)
     if ($targets.Count -gt 0) {
@@ -2008,16 +1946,12 @@ function Get-ExternalCheatHits {
             $messages += 'WARNING: Memory-reader scan failed to run (results may be incomplete)'
         } else {
             foreach ($ownerId in (@($rawReaders) | Select-Object -Unique)) {
-                if ($ownerId -le 0 -or $ownerId -eq $PID) { continue }
-
-                $record = Get-ExternalEvidenceRecord -Records $records -TargetPid ([int]$ownerId)
-                $nameLower = ($record.Name -replace '\.exe$', '').ToLower()
+                $info = Resolve-ProcessIdentity -TargetPid $ownerId
+                $nameLower = ($info.Name -replace '\.exe$', '').ToLower()
                 if ($script:ExternalReaderAllowlist -contains $nameLower) { continue }
-
-                Add-ExternalEvidence -Record $record `
-                    -Key 'MemoryRead' `
-                    -Description 'holds a readable handle to Roblox' `
-                    -Weight $script:ExternalEvidenceWeights.MemoryRead
+                $label = "$($info.Name) (PID $ownerId)"
+                if ($info.Path) { $label += " -> $($info.Path)" }
+                $messages += "FAILURE: Reading Roblox memory $label"
             }
         }
     }
@@ -2027,51 +1961,37 @@ function Get-ExternalCheatHits {
     if ($null -eq $rawWindows) {
         $messages += 'WARNING: Capture-protected window scan failed to run (results may be incomplete)'
     }
-    if ($null -ne $rawWindows) {
-        foreach ($w in @($rawWindows)) {
-            $parts = $w -split '\|', 4
-            if ($parts.Count -lt 2) { continue }
+    $windows = @($rawWindows)
+    foreach ($w in $windows) {
+        $parts = $w -split '\|', 4
+        if ($parts.Count -lt 2) { continue }
+        $winPid = 0
+        [void][int]::TryParse($parts[0], [ref]$winPid)
+        if ($winPid -eq $PID -or $winPid -le 0) { continue }
 
-            [int]$winPid = 0
-            if (-not [int]::TryParse($parts[0], [ref]$winPid)) { continue }
-            if ($winPid -eq $PID -or $winPid -le 0) { continue }
+        $info = Resolve-ProcessIdentity -TargetPid $winPid
+        $nameLower = ($info.Name -replace '\.exe$', '').ToLower()
+        if ($script:CaptureWindowAllowlist -contains $nameLower) { continue }
 
-            [uint32]$affinity = 0
-            if (-not [uint32]::TryParse($parts[1], [ref]$affinity)) { continue }
-            if ($affinity -eq 0) { continue }
-
-            $record = Get-ExternalEvidenceRecord -Records $records -TargetPid $winPid
-            $nameLower = ($record.Name -replace '\.exe$', '').ToLower()
-            if ($script:CaptureWindowAllowlist -contains $nameLower) { continue }
-
-            Add-ExternalEvidence -Record $record `
-                -Key 'CaptureProtected' `
-                -Description 'has one or more capture-protected windows' `
-                -Weight $script:ExternalEvidenceWeights.CaptureProtected
-
-            $affLabel = switch ($affinity) {
-                1  { 'WDA_MONITOR' }
-                17 { 'WDA_EXCLUDEFROMCAPTURE' }
-                default { "affinity=$affinity" }
-            }
-
-            $windowDetail = $affLabel
-            if ($parts.Count -ge 3 -and -not [string]::IsNullOrWhiteSpace($parts[2])) {
-                $windowDetail += " '$($parts[2])'"
-            }
-            [void]$record.WindowDetails.Add($windowDetail)
+        $affLabel = switch ($parts[1]) {
+            '1'  { 'WDA_MONITOR' }
+            '17' { 'WDA_EXCLUDEFROMCAPTURE' }
+            default { "affinity=$($parts[1])" }
         }
-    }
+        $title = if ($parts.Count -ge 3 -and $parts[2]) { " '$($parts[2])'" } else { '' }
+        $label = "$($info.Name) (PID $winPid)$title [$affLabel]"
 
-    foreach ($record in @($records.Values | Sort-Object Pid)) {
-        if ($record.Score -le 0) { continue }
-        $messages += Format-ExternalEvidenceRecord -Record $record
+        if ($info.Path -and -not (Test-TrustedProcessPath -ExecutablePath $info.Path)) {
+            $messages += "FAILURE: Window hidden from capture $label -> $($info.Path)"
+        } else {
+            $messages += "WARNING: Window hidden from capture $label"
+        }
     }
 
     if ($messages.Count -eq 0) {
         return 'SUCCESS: No external/overlay cheat detected'
     }
-    return @($messages | Select-Object -Unique)
+    return $messages
 }
 
 $script:BaselineBamKeys = @{}
@@ -2083,7 +2003,7 @@ function Test-AlertSetPassed {
     param([string[]]$Lines)
 
     if ($null -eq $Lines -or $Lines.Count -eq 0) { return $false }
-    return -not ($Lines | Where-Object { $_ -like 'FAILURE*' })
+    return -not ($Lines | Where-Object { $_ -like 'FAILURE*' -or $_ -like 'WARNING*' })
 }
 
 
@@ -2483,7 +2403,7 @@ foreach ($line in (Get-ExternalCheatHits)) {
     if ($line -like 'SUCCESS*') { continue }
     if (-not $reportedExternalHits.ContainsKey($line)) {
         $reportedExternalHits[$line] = $true
-        Write-MonitorAlert -Message $line -LogFile $logFile -Color (Get-AlertColor -Message $line)
+        Write-MonitorAlert -Message $line -LogFile $logFile -Color Yellow
     }
 }
 
@@ -2624,7 +2544,7 @@ while ($true) {
             if ($line -like 'SUCCESS*') { continue }
             if (-not $reportedExternalHits.ContainsKey($line)) {
                 $reportedExternalHits[$line] = $true
-                Write-MonitorAlert -Message $line -LogFile $logFile -Color (Get-AlertColor -Message $line)
+                Write-MonitorAlert -Message $line -LogFile $logFile -Color Yellow
             }
         }
     }
