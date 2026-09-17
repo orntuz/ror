@@ -28,12 +28,11 @@ public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 '@ -ErrorAction Stop
         }
 
-        $stdin = [RoR.RoRConsoleApi]::GetStdHandle(-10)
-        [uint32]$mode = 0
+        $stdin = [RoR.RoRConsoleApi]::GetStdHandle(-10)         [uint32]$mode = 0
         if (-not [RoR.RoRConsoleApi]::GetConsoleMode($stdin, [ref]$mode)) { return }
 
         $mode = ($mode -bor 0x0080) -band (-bnot 0x0040) -band (-bnot 0x0020)
-        [void][RoR.RoRConsoleApi]::SetConsoleMode($stdin, $mode)
+        [void][RoR.RoRConsoleApi]::SetConsoleMode($stdin,$mode)
     } catch {}
 }
 
@@ -59,7 +58,7 @@ function Open-LocalMachineRegistryKey {
             [Microsoft.Win32.RegistryHive]::LocalMachine,
             [Microsoft.Win32.RegistryView]::Registry64
         )
-        if ([string]::IsNullOrWhiteSpace($SubKeyPath)) { return $base }
+        if ([string]::IsNullOrWhiteSpace($SubKeyPath)) { return$base }
         return $base.OpenSubKey($SubKeyPath)
     } catch {
         return $null
@@ -73,22 +72,17 @@ function Add-RegistryKeyFingerprint {
         [System.Collections.Generic.List[string]]$Parts
     )
 
-    foreach ($name in $Key.GetValueNames()) {
-        $raw = $Key.GetValue($name)
-        if ($null -eq $raw) {
-            $Parts.Add("$Prefix|$name=")
-        } elseif ($raw -is [byte[]]) {
-            $Parts.Add("$Prefix|$name=0x$([BitConverter]::ToString($raw).Replace('-', ''))")
+    foreach ($name in $Key.GetValueNames()) {$raw = $Key.GetValue($name)
+        if ($null -eq $raw) {$Parts.Add("$Prefix\vert{}$name=")
+        } elseif ($raw -is [byte[]]) {$Parts.Add("$Prefix\vert{}$name=0x$([BitConverter]::ToString($raw).Replace('-', ''))")
         } else {
             $Parts.Add("$Prefix|$name=$raw")
         }
     }
 
-    foreach ($subName in $Key.GetSubKeyNames()) {
-        $subKey = $Key.OpenSubKey($subName)
+    foreach ($subName in $Key.GetSubKeyNames()) {$subKey = $Key.OpenSubKey($subName)
         if ($subKey) {
-            Add-RegistryKeyFingerprint -Key $subKey -Prefix "$Prefix\$subName" -Parts $Parts
-            $subKey.Close()
+            Add-RegistryKeyFingerprint -Key $subKey -Prefix "$Prefix\$subName" -Parts $Parts$subKey.Close()
         } else {
             $Parts.Add("$Prefix\$subName=<missing>")
         }
@@ -102,9 +96,9 @@ if (-not (Test-Admin)) {
 }
 
 function Write-Section {
-    param($Title, $Lines)
+    param($Title,$Lines)
     Write-Host "--- $Title ---" -ForegroundColor Cyan
-    foreach ($line in $Lines) {
+    foreach ($line in$Lines) {
         if ($line -like "SUCCESS*") { Write-Host $line -ForegroundColor Green }
         elseif ($line -like "FAILURE*") { Write-Host $line -ForegroundColor Red }
         elseif ($line -like "WARNING*") { Write-Host $line -ForegroundColor Yellow }
@@ -121,11 +115,11 @@ function Invoke-ToolDownload {
         [string]$DestDir
     )
 
-    if (-not $Url -or -not $ZipPath -or -not $DestDir) { return $false }
+    if (-not $Url -or -not$ZipPath -or -not $DestDir) { return$false }
 
     try {
-        $zipParent = Split-Path $ZipPath -Parent
-        if ($zipParent -and -not (Test-Path $zipParent)) {
+        $zipParent = Split-Path$ZipPath -Parent
+        if ($zipParent -and -not (Test-Path$zipParent)) {
             New-Item -ItemType Directory -Path $zipParent -Force | Out-Null
         }
         if (-not (Test-Path $DestDir)) {
@@ -139,11 +133,11 @@ function Invoke-ToolDownload {
         $previousProtocol = [Net.ServicePointManager]::SecurityProtocol
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-        $downloaded = $false
+        $downloaded =$false
         try {
             foreach ($attempt in 1..2) {
                 try {
-                    Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $Url -OutFile $ZipPath -UseBasicParsing -TimeoutSec 120 `
+                    Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $Url -OutFile$ZipPath -UseBasicParsing -TimeoutSec 120 `
                         -UserAgent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' | Out-Null
                     if ((Test-Path -LiteralPath $ZipPath) -and ((Get-Item -LiteralPath $ZipPath).Length -gt 1024)) {
                         $downloaded = $true
@@ -204,7 +198,7 @@ function Start-RoRExternalTool {
 
     $exe = Resolve-ToolExecutable -DestDir $DestDir -ExeName $ExeName -FallbackNames $FallbackExeNames
     if (-not $exe) {
-        if (Invoke-ToolDownload -Url $Url -ZipPath $ZipPath -DestDir $DestDir) {
+        if (Invoke-ToolDownload -Url $Url -ZipPath $DestDir -DestDir $DestDir) {
             $exe = Resolve-ToolExecutable -DestDir $DestDir -ExeName $ExeName -FallbackNames $FallbackExeNames
         }
     }
@@ -557,7 +551,7 @@ function Get-ClarityDetectionAlerts {
     }
 
     $masqueradeChecks = @(
-        @{ Name = "svchost";  LegitPattern = "C:\Windows\System32\svchost.exe" },
+        @{ Name = "svchost";  LegitPattern = "C:\Windows\*\svchost.exe" },
         @{ Name = "MsMpEng";  LegitPattern = "C:\ProgramData\Microsoft\Windows Defender\Platform\*\MsMpEng.exe" },
         @{ Name = "TiWorker"; LegitPattern = "C:\Windows\*\TiWorker.exe" }
     )
@@ -1227,7 +1221,7 @@ function Test-TrustedProcessPath {
 
 $script:MasqueradeProcessPaths = @{
     'svchost.exe'       = @('\windows\system32\svchost.exe', '\windows\syswow64\svchost.exe')
-    'explorer.exe'      = @('\windows\explorer.exe')
+    'explorer.exe'      = @('\windows\explorer.exe', '\windows\syswow64\explorer.exe')
     'csrss.exe'         = @('\windows\system32\csrss.exe')
     'lsass.exe'         = @('\windows\system32\lsass.exe')
     'services.exe'      = @('\windows\system32\services.exe')
@@ -1236,7 +1230,7 @@ $script:MasqueradeProcessPaths = @{
     'dwm.exe'           = @('\windows\system32\dwm.exe')
     'taskhostw.exe'     = @('\windows\system32\taskhostw.exe')
     'runtimebroker.exe' = @('\windows\system32\runtimebroker.exe')
-    'conhost.exe'       = @('\windows\system32\conhost.exe', '\windows\syswow64\conhost.exe')
+    'conhost.exe'       = @('\windows\system32\conhost.exe', '\windows\syswow64\conhost.exe', '\windowsapps\*\conhost.exe')
     'dllhost.exe'       = @('\windows\system32\dllhost.exe', '\windows\syswow64\dllhost.exe')
     'spoolsv.exe'       = @('\windows\system32\spoolsv.exe')
     'wininit.exe'       = @('\windows\system32\wininit.exe')
@@ -1494,7 +1488,7 @@ function Test-MasqueradeProcessPath {
 
     $pathLower = $ExecutablePath.ToLower().Replace('/', '\')
     foreach ($legitSuffix in $script:MasqueradeProcessPaths[$nameLower]) {
-        if ($pathLower.EndsWith($legitSuffix)) { return $null }
+        if ($pathLower -like "*$legitSuffix") { return $null }
     }
 
     return "Windows process '$ProcessName' running from non-standard path: $ExecutablePath"
@@ -1947,7 +1941,7 @@ Write-Host ""
 for ($i = 0; $i -le 20; $i++) {
     $percent = $i * 5
     $bar = ("#" * $i) + ("-" * (20 - $i))
-    Write-Host "`r[ $bar ] $percent%" -NoNewline
+    Write-Host "`r[ $bar ]$percent%" -NoNewline
     Start-Sleep -Milliseconds 120
 }
 Write-Host "`n"
@@ -2257,21 +2251,21 @@ Write-Host ""
 Write-Host "Keep this window open during the match. Must show again after match." -ForegroundColor Yellow
 Write-Host ""
 
-$logFile = Join-Path $env:ProgramData 'ror_security_events.log'
+$logFile = Join-Path$env:ProgramData 'ror_security_events.log'
 try {
-    if (-not (Test-Path $logFile)) { New-Item -Path $logFile -ItemType File -Force | Out-Null }
+    if (-not (Test-Path $logFile)) { New-Item -Path$logFile -ItemType File -Force | Out-Null }
     Write-MonitorAlert -Message "RoR v$($script:RoRVersion) monitor started" -LogFile $logFile
 } catch {
-    $logFile = Join-Path $env:TEMP 'ror_security_events.log'
-    if (-not (Test-Path $logFile)) { New-Item -Path $logFile -ItemType File -Force | Out-Null }
+    $logFile = Join-Path$env:TEMP 'ror_security_events.log'
+    if (-not (Test-Path $logFile)) { New-Item -Path$logFile -ItemType File -Force | Out-Null }
     Write-Host "WARNING: Logging to $logFile" -ForegroundColor Yellow
     Write-MonitorAlert -Message "RoR v$($script:RoRVersion) monitor started" -LogFile $logFile
 }
 
-$usbMonitoringAvailable = $false
+$usbMonitoringAvailable =$false
 try {
     Register-WmiEvent -Class Win32_VolumeChangeEvent -SourceIdentifier USBChange -ErrorAction Stop | Out-Null
-    $usbMonitoringAvailable = $true
+    $usbMonitoringAvailable =$true
 } catch {
     Write-MonitorAlert -Message "WARNING: USB insertion/removal monitoring unavailable ($($_.Exception.Message))" -LogFile $logFile -Color Yellow
 }
@@ -2285,73 +2279,55 @@ trap {
     break
 }
 
-foreach ($fp in (Get-BamRegistryFingerprints)) { $script:BaselineBamKeys[$fp] = $true }
-foreach ($pf in (Get-PrefetchFileNames)) { $script:BaselinePrefetchFiles[$pf] = $true }
+foreach ($fp in (Get-BamRegistryFingerprints)) {$script:BaselineBamKeys[$fp] =$true }
+foreach ($pf in (Get-PrefetchFileNames)) {$script:BaselinePrefetchFiles[$pf] =$true }
 
 $previousExclusions = @{}
-foreach ($ex in (Get-Exclusions)) { $previousExclusions[$ex] = $true }
-$knownCheatFolders = @{}
-foreach ($folder in (Get-CheatFolderHits)) {
-    $knownCheatFolders[$folder] = $true
+foreach ($ex in (Get-Exclusions)) { $previousExclusions[$ex] = $true }$knownCheatFolders = @{}
+foreach ($folder in (Get-CheatFolderHits)) {$knownCheatFolders[$folder] =$true
 }
 $reportedBamDeletions = @{}
-$reportedPrefetchDeletions = @{}
-$reportedTamperEvents = @{}
-$reportedPrefetchHits = @{}
-$reportedCursorChanges = @{}
-$reportedMainCplHits = @{}
-$baselineCursorScheme = Get-CursorSchemeState
-$reportedDefenderStatus = @{}
-$reportedRegistryTools = @{}
-$reportedWindhawkHits = @{}
-$reportedDefenderRegChanges = @{}
-$reportedExternalHits = @{}
-$reportedActiveThreats = @{}
-$baselineDefenderReg = Get-DefenderRegistryFingerprints
-$defenderRegLabels = Get-DefenderRegistryMonitorLabels
-$lastProcessSnapshot = Get-ProcessSnapshot
-$watchedProcesses = @{}
-$monitoringStart = Get-Date
-$folderScanCounter = 0
-$deletionScanCounter = 0
-$processChangeCounter = 0
-$mainCplScanCounter = 0
-$defenderScanCounter = 0
-$activeThreatScanCounter = 0
-$externalScanCounter = 0
+$reportedPrefetchDeletions = @{}$reportedTamperEvents = @{}
+$reportedPrefetchHits = @{}$reportedCursorChanges = @{}
+$reportedMainCplHits = @{}$baselineCursorScheme = Get-CursorSchemeState
+$reportedDefenderStatus = @{}$reportedRegistryTools = @{}
+$reportedWindhawkHits = @{}$reportedDefenderRegChanges = @{}
+$reportedExternalHits = @{}$reportedActiveThreats = @{}
+$baselineDefenderReg = Get-DefenderRegistryFingerprints$defenderRegLabels = Get-DefenderRegistryMonitorLabels
+$lastProcessSnapshot = Get-ProcessSnapshot$watchedProcesses = @{}
+$monitoringStart = Get-Date$folderScanCounter = 0
+$deletionScanCounter = 0$processChangeCounter = 0
+$mainCplScanCounter = 0$defenderScanCounter = 0
+$activeThreatScanCounter = 0$externalScanCounter = 0
 
 foreach ($line in (Get-DefenderStatusAlerts)) {
-    if ($line -like 'FAILURE*' -or $line -like 'WARNING*') {
-        $reportedDefenderStatus[$line] = $true
-        $color = 'Yellow'
-        Write-MonitorAlert -Message $line -LogFile $logFile -Color $color
+    if ($line -like 'FAILURE*' -or$line -like 'WARNING*') {
+        $reportedDefenderStatus[$line] = $true$color = 'Yellow'
+        Write-MonitorAlert -Message $line -LogFile $logFile -Color$color
     }
 }
 
-foreach ($hit in (Get-WindhawkProcessHits)) {
-    $reportedWindhawkHits[$hit] = $true
+foreach ($hit in (Get-WindhawkProcessHits)) {$reportedWindhawkHits[$hit] =$true
     Write-MonitorAlert -Message "Windhawk: $hit" -LogFile $logFile -Color Yellow
 }
 
 foreach ($line in (Get-ExternalCheatHits)) {
     if ($line -like 'SUCCESS*') { continue }
-    if (-not $reportedExternalHits.ContainsKey($line)) {
-        $reportedExternalHits[$line] = $true
-        Write-MonitorAlert -Message $line -LogFile $logFile -Color Yellow
+    if (-not $reportedExternalHits.ContainsKey($line)) {$reportedExternalHits[$line] =$true
+        Write-MonitorAlert -Message $line -LogFile$logFile -Color Yellow
     }
 }
 
 while ($true) {
-    $usbEvent = $null
-    if ($usbMonitoringAvailable) {
-        $usbEvent = Wait-Event -SourceIdentifier USBChange -Timeout 1 -ErrorAction SilentlyContinue
+    $usbEvent =$null
+    if ($usbMonitoringAvailable) {$usbEvent = Wait-Event -SourceIdentifier USBChange -Timeout 1 -ErrorAction SilentlyContinue
     } else {
         Start-Sleep -Seconds 1
     }
 
     if ($usbEvent) {
-        $eventType = $usbEvent.SourceEventArgs.NewEvent.EventType
-        $driveLetter = $usbEvent.SourceEventArgs.NewEvent.DriveName
+        $eventType =$usbEvent.SourceEventArgs.NewEvent.EventType
+        $driveLetter =$usbEvent.SourceEventArgs.NewEvent.DriveName
 
         if ($eventType -eq 2) {
             Write-MonitorAlert -Message "USB in $driveLetter" -LogFile $logFile
@@ -2364,11 +2340,11 @@ while ($true) {
 
     try {
         $currentExclusions = @{}
-        foreach ($ex in (Get-Exclusions)) { $currentExclusions[$ex] = $true }
+        foreach ($ex in (Get-Exclusions)) {$currentExclusions[$ex] =$true }
 
-        foreach ($ex in $currentExclusions.Keys) {
+        foreach ($ex in$currentExclusions.Keys) {
             if (-not $previousExclusions.ContainsKey($ex)) {
-                $exclKw = Get-MatchedCheatKeyword -Text $ex
+                $exclKw = Get-MatchedCheatKeyword -Text$ex
                 if ($exclKw) {
                     Write-MonitorAlert -Message "Exclusion added [$exclKw]: $ex" -LogFile $logFile -Color Yellow
                 } else {
@@ -2377,118 +2353,102 @@ while ($true) {
             }
         }
 
-        foreach ($ex in $previousExclusions.Keys) {
+        foreach ($ex in$previousExclusions.Keys) {
             if (-not $currentExclusions.ContainsKey($ex)) {
                 Write-MonitorAlert -Message "Exclusion removed: $ex" -LogFile $logFile -Color Yellow
             }
         }
 
-        $previousExclusions = $currentExclusions
+        $previousExclusions =$currentExclusions
     } catch {
         $warnKey = "exclusions|$($_.Exception.Message)"
-        if (-not $script:MainLoopFailureWarned.ContainsKey($warnKey)) {
-            $script:MainLoopFailureWarned[$warnKey] = $true
+        if (-not $script:MainLoopFailureWarned.ContainsKey($warnKey)) {$script:MainLoopFailureWarned[$warnKey] =$true
             Write-MonitorAlert -Message "WARNING: Exclusion tracking failed ($($_.Exception.Message))" -LogFile $logFile -Color Yellow
         }
     }
 
-    foreach ($change in (Get-CursorSchemeChanges -Baseline $baselineCursorScheme -Current (Get-CursorSchemeState))) {
-        if (-not $reportedCursorChanges.ContainsKey($change)) {
-            $reportedCursorChanges[$change] = $true
+    foreach ($change in (Get-CursorSchemeChanges -Baseline$baselineCursorScheme -Current (Get-CursorSchemeState))) {
+        if (-not $reportedCursorChanges.ContainsKey($change)) {$reportedCursorChanges[$change] =$true
             Write-MonitorAlert -Message "Cursor changed: $change" -LogFile $logFile -Color Yellow
         }
     }
 
     $mainCplScanCounter++
-    if ($mainCplScanCounter -ge 5) {
-        $mainCplScanCounter = 0
+    if ($mainCplScanCounter -ge 5) {$mainCplScanCounter = 0
         foreach ($hit in (Get-MainCplProcessHits)) {
-            if (-not $reportedMainCplHits.ContainsKey($hit)) {
-                $reportedMainCplHits[$hit] = $true
-                Write-MonitorAlert -Message $hit -LogFile $logFile -Color Yellow
+            if (-not $reportedMainCplHits.ContainsKey($hit)) {$reportedMainCplHits[$hit] =$true
+                Write-MonitorAlert -Message $hit -LogFile$logFile -Color Yellow
             }
         }
 
         foreach ($hit in (Get-RegistryToolProcessHits)) {
-            if (-not $reportedRegistryTools.ContainsKey($hit)) {
-                $reportedRegistryTools[$hit] = $true
+            if (-not $reportedRegistryTools.ContainsKey($hit)) {$reportedRegistryTools[$hit] =$true
                 Write-MonitorAlert -Message "Registry tool: $hit" -LogFile $logFile -Color Yellow
             }
         }
 
         foreach ($hit in (Get-WindhawkProcessHits)) {
-            if (-not $reportedWindhawkHits.ContainsKey($hit)) {
-                $reportedWindhawkHits[$hit] = $true
+            if (-not $reportedWindhawkHits.ContainsKey($hit)) {$reportedWindhawkHits[$hit] =$true
                 Write-MonitorAlert -Message "Windhawk: $hit" -LogFile $logFile -Color Yellow
             }
         }
     }
 
     $defenderScanCounter++
-    if ($defenderScanCounter -ge 5) {
-        $defenderScanCounter = 0
+    if ($defenderScanCounter -ge 5) {$defenderScanCounter = 0
 
         try {
             foreach ($line in (Get-DefenderStatusAlerts)) {
                 if (-not $reportedDefenderStatus.ContainsKey($line)) {
-                    $reportedDefenderStatus[$line] = $true
-                    $color = 'Yellow'
-                    Write-MonitorAlert -Message $line -LogFile $logFile -Color $color
+                    $reportedDefenderStatus[$line] = $true$color = 'Yellow'
+                    Write-MonitorAlert -Message $line -LogFile $logFile -Color$color
                 }
             }
 
             foreach ($entry in (Get-DefenderRegistryFingerprints).GetEnumerator()) {
-                $root = $entry.Key
-                $currentFp = $entry.Value
+                $root =$entry.Key
+                $currentFp =$entry.Value
                 $baselineFp = $baselineDefenderReg[$root]
-                if ($currentFp -eq $baselineFp) { continue }
+                if ($currentFp -eq$baselineFp) { continue }
 
-                $changeKey = "$root|$currentFp"
-                if ($reportedDefenderRegChanges.ContainsKey($changeKey)) { continue }
-                $reportedDefenderRegChanges[$changeKey] = $true
+                $changeKey = "$root\vert{}$currentFp"
+                if ($reportedDefenderRegChanges.ContainsKey($changeKey)) { continue }$reportedDefenderRegChanges[$changeKey] =$true
 
-                $label = if ($defenderRegLabels.ContainsKey($root)) { $defenderRegLabels[$root] } else { $root }
+                $label = if ($defenderRegLabels.ContainsKey($root)) {$defenderRegLabels[$root] } else {$root }
                 Write-MonitorAlert -Message "$label changed: $currentFp" -LogFile $logFile -Color Yellow
             }
         } catch {
             $warnKey = "defender|$($_.Exception.Message)"
-            if (-not $script:MainLoopFailureWarned.ContainsKey($warnKey)) {
-                $script:MainLoopFailureWarned[$warnKey] = $true
+            if (-not $script:MainLoopFailureWarned.ContainsKey($warnKey)) {$script:MainLoopFailureWarned[$warnKey] =$true
                 Write-MonitorAlert -Message "WARNING: Defender status/registry tracking failed ($($_.Exception.Message))" -LogFile $logFile -Color Yellow
             }
         }
     }
 
         $activeThreatScanCounter++
-    if ($activeThreatScanCounter -ge 5) {
-        $activeThreatScanCounter = 0
+    if ($activeThreatScanCounter -ge 5) {$activeThreatScanCounter = 0
         foreach ($line in (Get-ActiveDefenderThreatAlerts)) {
             if ($line -like 'SUCCESS*') { continue }
-            if (-not $reportedActiveThreats.ContainsKey($line)) {
-                $reportedActiveThreats[$line] = $true
-                Write-MonitorAlert -Message $line -LogFile $logFile -Color Yellow
+            if (-not $reportedActiveThreats.ContainsKey($line)) {$reportedActiveThreats[$line] =$true
+                Write-MonitorAlert -Message $line -LogFile$logFile -Color Yellow
             }
         }
     }
 
     $externalScanCounter++
-    if ($externalScanCounter -ge 5) {
-        $externalScanCounter = 0
+    if ($externalScanCounter -ge 5) {$externalScanCounter = 0
         foreach ($line in (Get-ExternalCheatHits)) {
             if ($line -like 'SUCCESS*') { continue }
-            if (-not $reportedExternalHits.ContainsKey($line)) {
-                $reportedExternalHits[$line] = $true
-                Write-MonitorAlert -Message $line -LogFile $logFile -Color Yellow
+            if (-not $reportedExternalHits.ContainsKey($line)) {$reportedExternalHits[$line] =$true
+                Write-MonitorAlert -Message $line -LogFile$logFile -Color Yellow
             }
         }
     }
 
     $folderScanCounter++
-    if ($folderScanCounter -ge 30) {
-        $folderScanCounter = 0
+    if ($folderScanCounter -ge 30) {$folderScanCounter = 0
         foreach ($folder in (Get-CheatFolderHits)) {
-            if (-not $knownCheatFolders.ContainsKey($folder)) {
-                $knownCheatFolders[$folder] = $true
+            if (-not $knownCheatFolders.ContainsKey($folder)) {$knownCheatFolders[$folder] =$true
                 Write-MonitorAlert -Message "Cheat folder: $folder" -LogFile $logFile -Color Yellow
             }
         }
@@ -2496,51 +2456,43 @@ while ($true) {
 
     $processChangeCounter++
     if ($processChangeCounter -ge 3) {
-        $processChangeCounter = 0
-        $currentProcessSnapshot = Get-ProcessSnapshot
-        Update-ProcessChangeMonitor -Previous $lastProcessSnapshot -Current $currentProcessSnapshot -Watched $watchedProcesses -LogFile $logFile
-        $lastProcessSnapshot = $currentProcessSnapshot
+        $processChangeCounter = 0$currentProcessSnapshot = Get-ProcessSnapshot
+        Update-ProcessChangeMonitor -Previous $lastProcessSnapshot -Current$currentProcessSnapshot -Watched $watchedProcesses -LogFile$logFile
+        $lastProcessSnapshot =$currentProcessSnapshot
     }
 
     $deletionScanCounter++
-    if ($deletionScanCounter -ge 10) {
-        $deletionScanCounter = 0
+    if ($deletionScanCounter -ge 10) {$deletionScanCounter = 0
 
         $currentBam = @{}
-        foreach ($fp in (Get-BamRegistryFingerprints)) { $currentBam[$fp] = $true }
-        foreach ($fp in $script:BaselineBamKeys.Keys) {
-            if (-not $currentBam.ContainsKey($fp) -and -not $reportedBamDeletions.ContainsKey($fp)) {
-                $reportedBamDeletions[$fp] = $true
+        foreach ($fp in (Get-BamRegistryFingerprints)) {$currentBam[$fp] =$true }
+        foreach ($fp in$script:BaselineBamKeys.Keys) {
+            if (-not $currentBam.ContainsKey($fp) -and -not$reportedBamDeletions.ContainsKey($fp)) {$reportedBamDeletions[$fp] =$true
                 $display = ($fp -split '\|')[-1]
                 Write-MonitorAlert -Message "BAM removed: $display" -LogFile $logFile -Color Yellow
             }
         }
 
         $currentPrefetch = @{}
-        foreach ($pf in (Get-PrefetchFileNames)) {
-            $currentPrefetch[$pf] = $true
+        foreach ($pf in (Get-PrefetchFileNames)) {$currentPrefetch[$pf] =$true
             if (-not $script:BaselinePrefetchFiles.ContainsKey($pf) -and -not $reportedPrefetchHits.ContainsKey($pf)) {
-                $pfKw = Get-MatchedCheatKeyword -Text $pf
-                if ($pfKw) {
-                    $reportedPrefetchHits[$pf] = $true
+                $pfKw = Get-MatchedCheatKeyword -Text$pf
+                if ($pfKw) {$reportedPrefetchHits[$pf] =$true
                     Write-MonitorAlert -Message "Prefetch added [$pfKw]: $pf" -LogFile $logFile -Color Yellow
                 }
             }
         }
-        foreach ($pf in $script:BaselinePrefetchFiles.Keys) {
+        foreach ($pf in$script:BaselinePrefetchFiles.Keys) {
             if (-not $currentPrefetch.ContainsKey($pf) -and -not $reportedPrefetchDeletions.ContainsKey($pf)) {
-                $pfKw = Get-MatchedCheatKeyword -Text $pf
-                if ($pfKw) {
-                    $reportedPrefetchDeletions[$pf] = $true
+                $pfKw = Get-MatchedCheatKeyword -Text$pf
+                if ($pfKw) {$reportedPrefetchDeletions[$pf] =$true
                     Write-MonitorAlert -Message "Prefetch deleted [$pfKw]: $pf" -LogFile $logFile -Color Yellow
                 }
             }
         }
 
-        foreach ($ev in (Get-TamperLogEvents -Since $monitoringStart -LogFile $logFile)) {
-            $eventKey = "$($ev.LogName)|$($ev.RecordId)"
-            if ($reportedTamperEvents.ContainsKey($eventKey)) { continue }
-            $reportedTamperEvents[$eventKey] = $true
+        foreach ($ev in (Get-TamperLogEvents -Since$monitoringStart -LogFile $logFile)) {$eventKey = "$($ev.LogName)|$($ev.RecordId)"
+            if ($reportedTamperEvents.ContainsKey($eventKey)) { continue }$reportedTamperEvents[$eventKey] =$true
             Write-MonitorAlert -Message "Log cleared ($($ev.Id))" -LogFile $logFile -Color Yellow
         }
     }
