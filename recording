@@ -2033,13 +2033,30 @@ function Test-AlertSetPassed {
 Write-Host "[ Step 1 of 3 - System Check ]" -ForegroundColor Cyan
 Write-Host ""
 
-for ($i = 0; $i -le 20; $i++) {
-    $percent = $i * 5
-    $bar = ("#" * $i) + ("-" * (20 - $i))
-    Write-Host "`r[ $bar ] $percent%" -NoNewline
-    Start-Sleep -Milliseconds 120
+$script:SystemCheckProgressTotal = 20
+$script:SystemCheckProgressCompleted = 0
+
+function Write-SystemCheckProgress {
+    param([string]$CurrentCheck)
+
+    $percent = [math]::Round(($script:SystemCheckProgressCompleted / $script:SystemCheckProgressTotal) * 100)
+    $filled = [math]::Floor(($percent / 100) * 20)
+    $bar = ("#" * $filled) + ("-" * (20 - $filled))
+    Write-Host "`r[ $bar ] $percent% | $CurrentCheck" -NoNewline
 }
-Write-Host "`n"
+
+function Complete-SystemCheckProgress {
+    param([string]$CompletedCheck)
+
+    $script:SystemCheckProgressCompleted++
+    $percent = [math]::Round(($script:SystemCheckProgressCompleted / $script:SystemCheckProgressTotal) * 100)
+    $filled = [math]::Floor(($percent / 100) * 20)
+    $bar = ("#" * $filled) + ("-" * (20 - $filled))
+    Write-Host "`r[ $bar ] $percent% | $CompletedCheck" -NoNewline
+}
+
+Write-SystemCheckProgress -CurrentCheck 'Starting system checks...'
+Write-Host ""
 
 $passedChecks = 0
 $totalChecks  = 0
@@ -2061,11 +2078,14 @@ $powerShellBinaryOutput = @()
 $activeThreatOutput     = @()
 $clarityDetectionOutput = @()
 
+Write-SystemCheckProgress -CurrentCheck 'Checking PowerShell modules...'
 $totalChecks++
 $moduleOutput = @(Initialize-RoRModules)
+Complete-SystemCheckProgress -CompletedCheck 'PowerShell modules checked'
 if (Test-AlertSetPassed $moduleOutput) { $passedChecks++ }
 
 
+Write-SystemCheckProgress -CurrentCheck 'Checking CPU and GPU...'
 $totalChecks++
 try {
     $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name
@@ -2079,7 +2099,9 @@ try {
 } catch {
     $cpuGpuOutput += "WARNING: Unable to query CPU/GPU information."
 }
+Complete-SystemCheckProgress -CompletedCheck 'CPU/GPU checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking Windows Defender...'
 $totalChecks++
 try {
     if (-not $script:DefenderAvailable) {
@@ -2111,7 +2133,9 @@ foreach ($disableKey in @(
         if ($disabled -eq 1) { $defenderOutput += "FAILURE: DisableAntiSpyware active." }
     } catch {}
 }
+Complete-SystemCheckProgress -CompletedCheck 'Windows Defender checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking Defender exclusions...'
 $totalChecks++
 try {
     $allExclusions = @(Get-Exclusions)
@@ -2136,7 +2160,9 @@ try {
 } catch {
     $exclusionsOutput += "WARNING: Exclusions check failed."
 }
+Complete-SystemCheckProgress -CompletedCheck 'Defender exclusions checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking allowed threats...'
 $totalChecks++
 try {
     $allowedThreats = @(Get-AllowedDefenderThreats)
@@ -2151,7 +2177,9 @@ try {
 } catch {
     $allowedThreatsOutput += "WARNING: Allowed threats check failed."
 }
+Complete-SystemCheckProgress -CompletedCheck 'Allowed threats checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking Memory Integrity...'
 $totalChecks++
 try {
     $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"
@@ -2165,11 +2193,15 @@ try {
 } catch {
     $memoryIntegrityOutput += "WARNING: Memory Integrity status unavailable."
 }
+Complete-SystemCheckProgress -CompletedCheck 'Memory Integrity checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking NVIDIA ShadowPlay...'
 $totalChecks++
 $nvidiaOutput += @(Get-NvidiaShadowPlayFtsAlerts)
 if (Test-AlertSetPassed $nvidiaOutput) { $passedChecks++ }
+Complete-SystemCheckProgress -CompletedCheck 'NVIDIA ShadowPlay checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Scanning processes...'
 $totalChecks++
 $procHits = @(Get-SuspiciousProcessHits)
 if ($procHits.Count -eq 0) {
@@ -2178,7 +2210,9 @@ if ($procHits.Count -eq 0) {
 } else {
     $processOutput += $procHits
 }
+Complete-SystemCheckProgress -CompletedCheck 'Process scan complete'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking KeyAuth...'
 $totalChecks++
 try {
     $keyAuthHits = @()
@@ -2203,17 +2237,23 @@ try {
 } catch {
     $keyAuthOutput += "WARNING: KeyAuth check failed"
 }
+Complete-SystemCheckProgress -CompletedCheck 'KeyAuth checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking Windhawk...'
 $totalChecks++
 foreach ($line in (Get-WindhawkStep1Alerts)) {
     $windhawkOutput += $line
     if ($line -like 'SUCCESS*') { $passedChecks++ }
 }
+Complete-SystemCheckProgress -CompletedCheck 'Windhawk checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Scanning external / overlay activity...'
 $totalChecks++
 $externalOutput += @(Get-ExternalCheatHits)
 if (Test-AlertSetPassed $externalOutput) { $passedChecks++ }
+Complete-SystemCheckProgress -CompletedCheck 'External / overlay scan complete'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking registry...'
 $totalChecks++
 $registryHit = $false
 try {
@@ -2227,38 +2267,56 @@ if (-not $registryHit) {
     $registryOutput += "SUCCESS: Registry clean"
     $passedChecks++
 }
+Complete-SystemCheckProgress -CompletedCheck 'Registry checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking PowerShell module integrity...'
 $moduleIntegrityOutput = @(Get-PowerShellModuleIntegrityAlerts)
 $totalChecks++
 if (Test-AlertSetPassed $moduleIntegrityOutput) { $passedChecks++ }
+Complete-SystemCheckProgress -CompletedCheck 'PowerShell module integrity checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking PowerShell binary integrity...'
 $powerShellBinaryOutput = @(Get-PowerShellBinaryIntegrityAlerts)
 $totalChecks++
 if (Test-AlertSetPassed $powerShellBinaryOutput) { $passedChecks++ }
+Complete-SystemCheckProgress -CompletedCheck 'PowerShell binary integrity checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking HVCI / Memory Integrity...'
 $additionalMemoryIntegrityOutput = @(Get-MemoryIntegrityAlerts)
 $totalChecks++
 if (Test-AlertSetPassed $additionalMemoryIntegrityOutput) { $passedChecks++ }
+Complete-SystemCheckProgress -CompletedCheck 'HVCI status checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking active Defender threats...'
 $activeThreatOutput = @(Get-ActiveDefenderThreatAlerts)
 $totalChecks++
 if (Test-AlertSetPassed $activeThreatOutput) { $passedChecks++ }
+Complete-SystemCheckProgress -CompletedCheck 'Active Defender threats checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking Clarity / Defender detection...'
 $clarityDetectionOutput = @(Get-ClarityDetectionAlerts)
 $totalChecks++
 if (Test-AlertSetPassed $clarityDetectionOutput) { $passedChecks++ }
+Complete-SystemCheckProgress -CompletedCheck 'Clarity / Defender detection checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking BAM / DAM execution history...'
 $totalChecks++
 $bamHistoryOutput = @(Get-BamHistoryAlerts)
 if (Test-AlertSetPassed $bamHistoryOutput) { $passedChecks++ }
+Complete-SystemCheckProgress -CompletedCheck 'BAM / DAM history checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking AutoRun / Persistence...'
 $totalChecks++
 $persistenceOutput = @(Get-PersistenceAlerts)
 if (Test-AlertSetPassed $persistenceOutput) { $passedChecks++ }
+Complete-SystemCheckProgress -CompletedCheck 'AutoRun / Persistence checked'
 
+Write-SystemCheckProgress -CurrentCheck 'Checking kernel drivers...'
 $totalChecks++
 $driverOutput = @(Get-SuspiciousDriverAlerts)
 if (Test-AlertSetPassed $driverOutput) { $passedChecks++ }
+Complete-SystemCheckProgress -CompletedCheck 'Kernel drivers checked'
+Write-Host "`n"
 
 Write-Section "Modules" $moduleOutput
 Write-Section "CPU & GPU Detections" $cpuGpuOutput
