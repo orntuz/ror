@@ -556,10 +556,6 @@ function Get-ClarityDetectionAlerts {
         }
     }
 
-    # Use the same normalized, case-insensitive path validation as the Process Scan.
-    # The previous implementation hard-coded C:\Windows and C:\ProgramData and used
-    # wildcard matching, which could flag valid Microsoft processes when the system
-    # root or path representation differed from those hard-coded strings.
     foreach ($processName in @('svchost', 'MsMpEng', 'TiWorker')) {
         Get-Process -Name $processName -ErrorAction SilentlyContinue | ForEach-Object {
             try {
@@ -1338,17 +1334,12 @@ function Resolve-ExecutablePathFromCommandLine {
 
     $expanded = [Environment]::ExpandEnvironmentVariables($CommandLine.Trim())
 
-    # Most service ImagePath values with spaces are quoted. Preserve that exact path.
     $match = [regex]::Match($expanded, '^\s*"([^"]+)"')
     if ($match.Success) { return $match.Groups[1].Value }
 
-    # Kernel driver services normally point to a .sys image. Capture the complete
-    # path even when Windows stores the ImagePath without quotes and the path has spaces.
     $match = [regex]::Match($expanded, '^\s*(?<path>.*?\.sys)(?:\s+.*)?$', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     if ($match.Success) { return $match.Groups['path'].Value.Trim().Trim('"') }
 
-    # Fallback for non-standard driver image names: progressively test whitespace-
-    # separated prefixes so paths such as "C:\Program Files\..." are not truncated to C:\Program.
     $tokens = $expanded -split '\s+'
     if ($tokens.Count -gt 1) {
         for ($i = $tokens.Count; $i -ge 1; $i--) {
@@ -1575,9 +1566,6 @@ function Test-MasqueradeProcessPath {
     $systemRoot = Normalize-ProcessImagePath -ExecutablePath $env:SystemRoot
     $systemRootPrefix = $systemRoot + '\'
 
-    # Match against the actual Windows root, not a hard-coded C:\Windows string.
-    # This keeps legitimate system32/syswow64 images valid while preventing a
-    # user-controlled path that merely ends with the same filename from passing.
     if (-not $path.StartsWith($systemRootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
         return "Windows process '$ProcessName' running from non-standard path: $ExecutablePath"
     }
